@@ -26,6 +26,7 @@ from denoise_model import DenoiseNN, p_losses, sample
 from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
 
 from deepwalk_utils import preprocess_dataset_deepwalk
+from utils_bert_encoding import preprocess_dataset_bert
 
 
 from torch.utils.data import Subset
@@ -105,23 +106,32 @@ parser.add_argument('--n-condition', type=int, default=7, help="Number of distin
 
 
 # CUSTOM ARGS
-#embedd using deepwalk
-parser.add_argument('--embedding', type=str, default="spectral", help="specifies embedding. Possible values : 'Deepwalk', 'spectral'")
+#embedd graphs using deepwalk
+parser.add_argument('--graph_embedding', type=str, default="spectral", help="specifies embedding. Possible values : 'Deepwalk', 'spectral'")
+
+#embedd prompts using bert
+parser.add_argument('--text_embedding', type=str, default="basic", help="specifies embedding. Possible values : 'bert', 'basic'")
 
 args = parser.parse_args()
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # preprocess train data, validation data and test data. Only once for the first time that you run the code. Then the appropriate .pt files will be saved and loaded.
-if args.embedding == 'deepwalk':
+if args.graph_embedding == 'deepwalk':
     trainset = preprocess_dataset_deepwalk("train", args.n_max_nodes, args.spectral_emb_dim)
     validset = preprocess_dataset_deepwalk("valid", args.n_max_nodes, args.spectral_emb_dim)
+    testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim)
+
+elif args.text_embedding == 'bert':
+    testset = preprocess_dataset_bert("test", args.n_max_nodes, args.spectral_emb_dim, args.n_condition)
+    trainset = preprocess_dataset_bert("train", args.n_max_nodes, args.spectral_emb_dim, args.n_condition)
+    validset = preprocess_dataset_bert("valid", args.n_max_nodes, args.spectral_emb_dim, args.n_condition)
+    
 
 else:
     trainset = preprocess_dataset("train", args.n_max_nodes, args.spectral_emb_dim)
     validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim)
-
-testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim)
+    testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim)
 
 
 

@@ -9,6 +9,25 @@ import re
 from tqdm import tqdm
 from random import choice
 
+import argparse
+
+parser = argparse.ArgumentParser(description='Parses arguments for generation')
+
+# Add arguments for two paths with default values
+parser.add_argument('--path-to-data', type=str, default='data/',
+                    help='path to the data/ folder that itself has at least a train/ and val/ dir')
+parser.add_argument('--n-switches', type=int, default=2, 
+                    help='Number of graphs to generate by toggling edges')
+parser.add_argument('--n-additions', type=int, default=2, 
+                    help='Number of graphs to generate by adding nodes and edges')
+parser.add_argument('--n-deletions', type=int, default=2, 
+                    help='Number of graphs to generate by deleting nodes')
+# Parse the arguments
+args = parser.parse_args()
+
+train_path = os.path.join(args.path_to_data, 'train/')
+valid_path = os.path.join(args.path_to_data, 'valid/')
+n_switch, n_add, n_del = args.n_switches, args.n_additions, args.n_deletions
 # utils
 
 # define a function that provided a graph G returns its features
@@ -97,14 +116,14 @@ def delete(G, n):
 
 import multiprocessing
 
-def process_graph_file(args):
+def process_graph_file(arguments):
     """
     Process a single graph file with all transformations
     
     Args:
     - args: tuple containing (graphs_dir, desc_dir, filename)
     """
-    graphs_dir, desc_dir, filename = args
+    graphs_dir, desc_dir, filename = arguments
     
     fread = os.path.join(graphs_dir, filename)
     
@@ -121,18 +140,11 @@ def process_graph_file(args):
     # Number of nodes
     n_nodes = G.number_of_nodes()
     
-    # Random number of switches/adds/deletes
-    ns = np.random.randint(1, int(n_nodes * 0.2 + 1), 6)
-    
     # Generate transformed graphs
-    new_Gs = [
-        switch(G, ns[0]), 
-        switch(G, ns[1]), 
-        add(G, ns[2]),
-        add(G, ns[3]), 
-        delete(G, ns[4]), 
-        delete(G, ns[5])
-    ]
+    switches = [switch(G, np.random.randint(1, int(n_nodes * 0.2 + 1))) for _ in range(n_switch)]
+    adds = [add(G, np.random.randint(1, int(n_nodes * 0.2 + 1))) for _ in range(n_add)]
+    dels = [delete(G, np.random.randint(1, int(n_nodes * 0.2 + 1))) for _ in range(n_del)]
+    new_Gs = switches + adds + dels
     
     # Save valid transformed graphs
     results = []

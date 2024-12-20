@@ -99,7 +99,7 @@ parser.add_argument('--train-autoencoder', action='store_false', default=True, h
 parser.add_argument('--train-denoiser', action='store_true', default=True, help="Flag to enable/disable denoiser training (default: enabled)")
 
 # Dimensionality of conditioning vectors for conditional generation
-parser.add_argument('--dim-condition', type=int, default=128, help="Dimensionality of conditioning vectors for conditional generation (default: 128)")
+parser.add_argument('--dim-condition', type=int, default=7, help="Dimensionality of conditioning vectors for conditional generation (default: 128)")
 
 # Number of conditions used in conditional vector (number of properties)
 parser.add_argument('--n-condition', type=int, default=7, help="Number of distinct condition properties used in conditional vector (default: 7)")

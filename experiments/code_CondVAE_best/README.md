@@ -87,7 +87,20 @@ Either to do inference or to train a denoiser once a CondVAE has been trained (r
     python3 main_condVAE.py --hidden-dim-encoder 32 --hidden-dim-decoder 768 --latent-dim 64 --n-layers-encoder 4 --n-layers-decoder 4 --cond-hid-dim 48 --train-autoencoder --epochs-denoise 50000 --hidden-dim-denoise 512 --dim-condition 32 --n-layers_denoise 3 --timesteps 500 --lr 1e-3
     ```
 
-**example 2** *To simply infer with both a denoiser and an autoencoder*
+**example 2** Continue training a CondVAE to finetune it. 
+
+Again with the example of the best model as of saturday 01/05 :
+
+- Identify the files, copy `autoencoder_condVAE_0-21641.pth.tar` into the same dir as `main_condVAE.py` and **rename** it `autoencoder_condVAE.pth.tar`.
+
+- Use `args_0-21641.txt` to complete the command below, and make sure to use `--resume-training-vae` that will load the checkpoint : 
+
+  - ```sh
+    python3 main_condVAE.py --hidden-dim-encoder 32 --hidden-dim-decoder 768 --latent-dim 64 --n-layers-encoder 4 --n-layers-decoder 4 --cond-hid-dim 48 --resume-training-vae --epochs-autoencoder 10 --lr 1e-5 --use-denoiser
+    ```
+
+
+**example 3** *To simply infer with both a denoiser and an autoencoder*
 
 - take the files from `autoencoders/` and `denoisers/`, copy them in the main dir and rename them **exactly** `autoencoder_condVAE.pth.tar` and `denoise_model.pth.tar`
 

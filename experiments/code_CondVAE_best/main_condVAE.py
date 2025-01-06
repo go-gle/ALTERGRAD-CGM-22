@@ -137,7 +137,11 @@ parser.add_argument('--graph_embedding', type=str, default="spectral", help="spe
 parser.add_argument('--text_embedding', type=str, default="basic", help="specifies embedding. Possible values : 'bert', 'basic'")
 
 # toggle conditionning in the denoiser
-parser.add_argument('--use-cond-denoising', action='store_false', default=True, help="Flag to enable/disable denoiser training (default: enabled)")
+parser.add_argument('--use-cond-denoising', action='store_false', default=True, help="Flag to enable/disable use of conditionning in the denoiser (default: enabled)")
+
+# toggle conditionning in the denoiser
+parser.add_argument('--resume-training-vae', action='store_true', default=False, help="Flag to pick up the training of the autoencoder")
+
 args = parser.parse_args()
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -172,9 +176,17 @@ test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 # initialize VGAE model
 
 autoencoder = CondVariationalAutoEncoder(args.spectral_emb_dim+1, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, n_max_nodes=args.n_max_nodes, cond_hid_dim=args.cond_hid_dim).to(device)
+
+if args.resume_training_vae:
+    print('Loading VAE checkpoint...')
+    checkpoint = torch.load('autoencoder_condVAE.pth.tar')
+    autoencoder.load_state_dict(checkpoint['state_dict'])
 optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
+
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 early_stopping_counts = 0
+
+
 
 #### TRAIN CONDITIONAL VAE
 print("\nTraining the conditional VAE....")

@@ -123,7 +123,7 @@ elif args.text_embedding == 'bert':
 
 else:
     trainset = preprocess_dataset("train", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
-    validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
+    #validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
     testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
 
 
@@ -131,7 +131,7 @@ else:
 
 # initialize data loaders
 train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
-val_loader = DataLoader(validset, batch_size=args.batch_size, shuffle=False)
+#val_loader = DataLoader(validset, batch_size=args.batch_size, shuffle=False)
 test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
 # initialize MLP
@@ -171,6 +171,15 @@ if args.train_mlp:
             train_loss_all += loss.item()
             train_count += torch.max(data.batch)+1
             optimizer.step()
+        
+        if epoch % 1 == 0:
+            print('Epoch: {:04d}, Train Reconstruction Loss: {:.5f}'.format(epoch, train_loss_all/cnt_train))
+        if ((epoch <= 1000) & (epoch % 200 == 0)) or ((epoch > 1000) & (epoch <= 5000) & (epoch % 500 == 0)) or (epoch % 1000 == 0):
+            torch.save({
+                'state_dict': mlp.state_dict(),
+                'optimizer' : optimizer.state_dict(),
+            }, f'noval/MLP_{id_}_ep{epoch}.pth.tar')
+        """
         mlp.eval()
         val_loss_all = 0
         val_count = 0
@@ -203,15 +212,20 @@ if args.train_mlp:
         #    break
             
     #checkpoint = torch.load(f'temp/MLP_{id_}.pth.tar')
-    #mlp.load_state_dict(checkpoint['state_dict'])
+    #mlp.load_state_dict(checkpoint['state_dict'])"""
+    torch.save({
+            'state_dict': mlp.state_dict(),
+            'optimizer' : optimizer.state_dict(),
+        }, f'noval/MLP_{id_}.pth.tar')
 else:
     checkpoint = torch.load('MLP.pth.tar')
     mlp.load_state_dict(checkpoint['state_dict'])
 
 
+
 mlp.eval()
 
-del train_loader, val_loader
+del train_loader
 
 
 
@@ -258,12 +272,12 @@ os.rename(f"temp/MLP_{id_}.csv", f"runs/output_csvs/MLP_{str(mae)[:8].replace('.
 
 # save vae
 if args.train_mlp:
-    checkpoint = torch.load(f'temp/MLP_{id_}.pth.tar')
+    checkpoint = torch.load(f'noval/MLP_{id_}.pth.tar')
     mlp.load_state_dict(checkpoint['state_dict'])
     torch.save({
                     'state_dict': mlp.state_dict(),
                     'optimizer' : optimizer.state_dict(),
-                }, f"runs/mlps/MLP_{str(mae)[:8].replace('.', '-')}.pth.tar")
+                }, f"runs/mlps/MLP_noval_{str(mae)[:8].replace('.', '-')}.pth.tar")
 
 else:
     checkpoint = torch.load('MLP.pth.tar')

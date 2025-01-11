@@ -32,13 +32,6 @@ from eval_final import eval
 
 from torch.utils.data import Subset
 
-#because we're running multiple scripts at once let's define an id at random not to mix up the files
-id_ = np.random.randint(10000000)
-
-#now fix the seed
-#seed = 29
-#np.random.seed(seed)
-#torch.manual_seed(seed)
 
 """
 Parses command line arguments for configuring the NeuralGraphGenerator model. This includes
@@ -122,163 +115,73 @@ elif args.text_embedding == 'bert':
     
 
 else:
-    trainset = preprocess_dataset("train", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
-    validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
+    #trainset = preprocess_dataset("train", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
+    #validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
     testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
 
 
 
 
-# initialize data loaders
-train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
-val_loader = DataLoader(validset, batch_size=args.batch_size, shuffle=False)
 test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
 # initialize MLP
 architecture = [int(s) for s in args.architecture.split(',')]
 
-mlp = MixMLP(architecture, n_nodes=args.n_max_nodes, cutoff=args.cutoff).to(device)
+# loop on what was produced
+files = os.listdir('noval_runs/mlps/')
 
-if args.resume_training_mlp:
-    print('Loading MLP checkpoint...')
-    checkpoint = torch.load('MLP.pth.tar')
+with open('noval_runs/progress.csv', 'a') as prog:
+    prog.write('run,epoch,mae\n')
+for file in tqdm(files):
+    mlp = MixMLP(architecture, n_nodes=args.n_max_nodes, cutoff=args.cutoff).to(device)
+    splitted = file.split('_')
+    if len(splitted) == 2:
+        continue
+    run, epoch = splitted[1], splitted[2][2:-8]
+    checkpoint = torch.load(f'noval_runs/mlps/{file}')
     mlp.load_state_dict(checkpoint['state_dict'])
-optimizer = torch.optim.Adam(mlp.parameters(), lr=args.lr)
 
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
-early_stopping_counts = 0
+    mlp.eval()
 
-
-
-#### TRAIN MLP
-print("\nTraining the MLP....")
-if args.train_mlp:
-
-    best_val_loss = np.inf
-    
-    for epoch in range(1, args.epochs_mlp + 1):
-        mlp.train()
-        train_loss_all = 0
-        train_count = 0
-        cnt_train=0
-        
-        for data in train_loader:
+    # Save to a CSV file
+    with open("noval_runs/output_csvs/temporary.csv", "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        # Write the header
+        writer.writerow(["graph_id", "edge_list"])
+        for k, data in enumerate(tqdm(test_loader, desc='Processing test set',)):
             data = data.to(device)
-            optimizer.zero_grad()
-            loss = mlp.loss_function(data)
-            cnt_train+=1
-            loss.backward()
-            train_loss_all += loss.item()
-            train_count += torch.max(data.batch)+1
-            optimizer.step()
-        mlp.eval()
-        val_loss_all = 0
-        val_count = 0
-        cnt_val = 0
-        val_loss_all_recon = 0
-        val_loss_all_kld = 0
-        
-        for data in val_loader:
-            data = data.to(device)
-            loss = mlp.loss_function(data)
-            val_loss_all += loss.item()
-            cnt_val+=1
-            val_count += torch.max(data.batch)+1
-        
-        if epoch % 1 == 0:
-            print('Epoch: {:04d}, Train Reconstruction Loss: {:.5f}, Val Reconstruction Loss: {:.5f}'.format(epoch, train_loss_all/cnt_train, val_loss_all/cnt_val))
-        
-        scheduler.step()
-        early_stopping_counts += 1
-        if best_val_loss >= val_loss_all:
-            best_val_loss = val_loss_all
-            torch.save({
-                'state_dict': mlp.state_dict(),
-                'optimizer' : optimizer.state_dict(),
-            }, f'temp/MLP_{id_}.pth.tar')
-            early_stopping_counts = 0
 
-        #if early_stopping_counts == args.early_stopping_rounds:
-        #    print('early stopping')
-        #    break
-            
-    #checkpoint = torch.load(f'temp/MLP_{id_}.pth.tar')
-    #mlp.load_state_dict(checkpoint['state_dict'])
-else:
-    checkpoint = torch.load('MLP.pth.tar')
-    mlp.load_state_dict(checkpoint['state_dict'])
+            stat = data.stats
+            graph_ids = data.filename
+            adj = mlp(data)
+            stat_d = torch.reshape(stat, (-1, args.n_condition))
 
 
-mlp.eval()
+            for i in range(stat.size(0)):
+                stat_x = stat_d[i]
 
-del train_loader, val_loader
+                Gs_generated = construct_nx_from_adj(adj[i,:,:].detach().cpu().numpy())
+                stat_x = stat_x.detach().cpu().numpy()
 
+                # Define a graph ID
+                graph_id = graph_ids[i]
 
-
-
-# Save to a CSV file
-with open(f"temp/MLP_{id_}.csv", "w", newline="") as csvfile:
-    writer = csv.writer(csvfile)
-    # Write the header
-    writer.writerow(["graph_id", "edge_list"])
-    for k, data in enumerate(tqdm(test_loader, desc='Processing test set',)):
-        data = data.to(device)
-        
-        stat = data.stats
-        graph_ids = data.filename
-        adj = mlp(data)
-        stat_d = torch.reshape(stat, (-1, args.n_condition))
+                # Convert the edge list to a single string
+                edge_list_text = ", ".join([f"({u}, {v})" for u, v in Gs_generated.edges()])           
+                # Write the graph ID and the full edge list as a single row
+                writer.writerow([graph_id, edge_list_text])
 
 
-        for i in range(stat.size(0)):
-            stat_x = stat_d[i]
+    ### Evaluate
+    truth_file = f'{args.dataset}/test/test.txt'
+    pred_file = "noval_runs/output_csvs/temporary.csv"
 
-            Gs_generated = construct_nx_from_adj(adj[i,:,:].detach().cpu().numpy())
-            stat_x = stat_x.detach().cpu().numpy()
+    mae = eval(truth_file, pred_file)
 
-            # Define a graph ID
-            graph_id = graph_ids[i]
-
-            # Convert the edge list to a single string
-            edge_list_text = ", ".join([f"({u}, {v})" for u, v in Gs_generated.edges()])           
-            # Write the graph ID and the full edge list as a single row
-            writer.writerow([graph_id, edge_list_text])
+    print(f"-----------------------------------------------\nTest MAE : {mae}\n-----------------------------------------------")
 
 
-### Evaluate
-truth_file = f'{args.dataset}/test/test.txt'
-pred_file = f"temp/MLP_{id_}.csv"
-
-mae = eval(truth_file, pred_file)
-
-print(f"-----------------------------------------------\nTest MAE : {mae}\n-----------------------------------------------")
-
-
-os.rename(f"temp/MLP_{id_}.csv", f"runs/output_csvs/MLP_{str(mae)[:8].replace('.', '-')}.csv")
-
-# save vae
-if args.train_mlp:
-    checkpoint = torch.load(f'temp/MLP_{id_}.pth.tar')
-    mlp.load_state_dict(checkpoint['state_dict'])
-    torch.save({
-                    'state_dict': mlp.state_dict(),
-                    'optimizer' : optimizer.state_dict(),
-                }, f"runs/mlps/MLP_{str(mae)[:8].replace('.', '-')}.pth.tar")
-
-else:
-    checkpoint = torch.load('MLP.pth.tar')
-    mlp.load_state_dict(checkpoint['state_dict'])
-    torch.save({
-                    'state_dict': mlp.state_dict(),
-                    'optimizer' : optimizer.state_dict(),
-                }, f"runs/mlps/MLP_{str(mae)[:8].replace('.', '-')}.pth.tar")
-
-#save_args not to get lost
-def save_args_to_file(args, file_path=f"runs/args/args_{str(mae)[:8].replace('.', '-')}.txt"):
-    with open(file_path, "w") as f:
-        f.write("Parsed Arguments:\n")
-        for key, value in vars(args).items():
-            f.write(f"{key}: {value}\n")
-    print(f"Arguments saved to {os.path.abspath(file_path)}")
-
-save_args_to_file(args)
+    os.rename("noval_runs/output_csvs/temporary.csv", f"noval_runs/output_csvs/MLP_{str(mae)[:8].replace('.', '-')}_noval{run}_ep{epoch}.csv")
+    os.rename(f'noval_runs/mlps/{file}', f"noval_runs/mlps/MLP_{str(mae)[:8].replace('.', '-')}_noval{run}_ep{epoch}.pth.tar")
+    with open('noval_runs/progress.csv', 'a') as prog:
+        prog.write(f'{run},{epoch},{str(mae)[:10]}\n')

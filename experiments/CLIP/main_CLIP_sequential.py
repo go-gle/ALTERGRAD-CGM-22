@@ -21,13 +21,19 @@ from torch_geometric.data import Data
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
-from autoencoder_CLIP import VariationalAutoEncoder
-from denoise_model import DenoiseNN, p_losses, sample
-from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
+import sys
+original_sys_path_length = len(sys.path)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from deepwalk_utils import preprocess_dataset_deepwalk
-from utils_bert_encoding import preprocess_dataset_bert
-from eval import eval
+from autoencoder_CLIP import VariationalAutoEncoder
+
+from src.denoise_model_custom import DenoiseNN, p_losses, sample
+from src.baseline.utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
+from src.deepwalk_utils import preprocess_dataset_deepwalk
+from src.utils_bert_encoding import preprocess_dataset_bert
+from eval_CLIP import eval
+
+sys.path = sys.path[:original_sys_path_length]
 
 from torch.utils.data import Subset
 

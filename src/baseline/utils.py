@@ -17,16 +17,27 @@ from tqdm import tqdm
 import scipy.sparse as sparse
 from torch_geometric.data import Data
 
-from extract_feats import extract_feats, extract_numbers
+import sys
+original_sys_path_length = len(sys.path)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
+from src.baseline.extract_feats import extract_feats, extract_numbers
 
+### CUSTOM
+# get standard scaling stuff
+try:
+    cond_mean, cond_std = torch.load('../../src/cond_standard_scaling')
+except Exception as e:
+    print("\n\n--------------------\nPlease generate the standard scaling: \n\npython3 get_cond_scaler.py\n--------------------\n")
+    raise e
+###
 
-def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
+def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim, datafolder='data'):
 
     data_lst = []
     if dataset == 'test':
-        filename = '../data/dataset_'+dataset+'.pt'
-        desc_file = '../data/'+dataset+'/test.txt'
+        filename = f'./{datafolder}/dataset_'+dataset+'.pt'
+        desc_file = f'./{datafolder}/'+dataset+'/test.txt'
 
         if os.path.isfile(filename):
             data_lst = torch.load(filename)
@@ -42,6 +53,7 @@ def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
                 desc = "".join(desc)
                 feats_stats = extract_numbers(desc)
                 feats_stats = torch.FloatTensor(feats_stats).unsqueeze(0)
+                feats_stats = ((feats_stats - cond_mean) / cond_std).float() ### CUSTOM
                 data_lst.append(Data(stats=feats_stats, filename = graph_id))
             fr.close()                    
             torch.save(data_lst, filename)
@@ -49,9 +61,9 @@ def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
 
 
     else:
-        filename = '../data/dataset_'+dataset+'.pt'
-        graph_path = '../data/'+dataset+'/graph'
-        desc_path = '../data/'+dataset+'/description'
+        filename = f'./{datafolder}/dataset_'+dataset+'.pt'
+        graph_path = f'./{datafolder}/'+dataset+'/graph'
+        desc_path = f'./{datafolder}/'+dataset+'/description'
 
         if os.path.isfile(filename):
             data_lst = torch.load(filename)
@@ -107,7 +119,7 @@ def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
                 diags = np.squeeze(np.asarray(diags))
                 D = sparse.diags(diags).toarray()
                 L = D - adj_bfs
-                with  np.errstate(divide="ignore"):
+                with np.errstate(divide="ignore"):
                     diags_sqrt = 1.0 / np.sqrt(diags)
                 diags_sqrt[np.isinf(diags_sqrt)] = 0
                 DH = sparse.diags(diags).toarray()
@@ -132,7 +144,7 @@ def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
 
                 feats_stats = extract_feats(fstats)
                 feats_stats = torch.FloatTensor(feats_stats).unsqueeze(0)
-
+                feats_stats = ((feats_stats - cond_mean) / cond_std).float() ### CUSTOM
                 data_lst.append(Data(x=x, edge_index=edge_index, A=adj, stats=feats_stats, filename = filen))
             torch.save(data_lst, filename)
             print(f'Dataset {filename} saved')

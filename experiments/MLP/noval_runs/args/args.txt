@@ -1,0 +1,5 @@
+all have args :
+--lr 1e-3 --epochs-mlp 2000 --architecture 16,64,256,1024,2048 --batch-size 256 --cutoff 0 --dataset data_trainval_merged
+
+to run the eval thing over all epochs : 
+python3 eval_all_novals.py --architecture 16,64,256,1024,2048 --batch-size 256 --cutoff 0 --dataset data_trainval_merged

@@ -20,23 +20,28 @@ from torch_geometric.data import Data
 
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
+
 import sys
 original_sys_path_length = len(sys.path)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from autoencoder_CLIP_cond import CondCLIPVAE
+from cond_autoencoder import CondVariationalAutoEncoder
 from src.denoise_model_custom import DenoiseNN, p_losses, sample
 from src.baseline.utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
 
 from src.deepwalk_utils import preprocess_dataset_deepwalk
 from src.utils_bert_encoding import preprocess_dataset_bert
-from src.eval import eval
+from src.eval_final import eval
 
 sys.path = sys.path[:original_sys_path_length]
 
 from torch.utils.data import Subset
 
-seed = 2
+#because we're running multiple scripts at once let's define an id at random not to mix up the files
+id_ = np.random.randint(10000000)
+
+#now fix the seed
+seed = 29
 np.random.seed(seed)
 torch.manual_seed(seed)
 
@@ -107,29 +112,40 @@ parser.add_argument('--n-layers_denoise', type=int, default=3, help="Number of l
 parser.add_argument('--train-autoencoder', action='store_false', default=True, help="Flag to enable/disable autoencoder (VGAE) training (default: enabled)")
 
 # Flag to toggle training of the diffusion-based denoising model
-parser.add_argument('--train-denoiser', action='store_true', default=True, help="Flag to enable/disable denoiser training (default: enabled)")
+parser.add_argument('--train-denoiser', action='store_false', default=True, help="Flag to enable/disable denoiser training (default: enabled)")
 
 # Dimensionality of conditioning vectors for conditional generation
-parser.add_argument('--dim-condition', type=int, default=32, help="Dimensionality of conditioning vectors for conditional generation (default: 32)")
+parser.add_argument('--dim-condition', type=int, default=16, help="Dimensionality of conditioning vectors for conditional generation (default: 16, base : 128)")
 
 # Number of conditions used in conditional vector (number of properties)
 parser.add_argument('--n-condition', type=int, default=7, help="Number of distinct condition properties used in conditional vector (default: 7)")
 
 
 # CUSTOM ARGS
+# pick data folder
+parser.add_argument('--dataset', type=str, default="data", help="specifies path to dataset")
+
+# toggle denosier usage
 # Flag to toggle training of the diffusion-based denoising model
 parser.add_argument('--use-denoiser', action='store_false', default=True, help="Flag to enable/disable denoiser training (default: enabled)")
-#scaling to nerf CLIP
-parser.add_argument('--clip-loss-scaling', type=float, default=1, help="Factor by which is multiplied the contrastive loss to diminish its weight against the recon loss (default: 1)")
 
 #early stopping rounds
 parser.add_argument('--early-stopping-rounds', type=int, default=30, help="early stopping rounds patience (default: 15)")
+
+#hidden dim for conditioning in the condVAE
+parser.add_argument('--cond-hid-dim', type=int, default=5, help="hidden dim for conditioning in the condVAE(default: 5)")
 
 #embedd graphs using deepwalk
 parser.add_argument('--graph_embedding', type=str, default="spectral", help="specifies embedding. Possible values : 'Deepwalk', 'spectral'")
 
 #embedd prompts using bert
 parser.add_argument('--text_embedding', type=str, default="basic", help="specifies embedding. Possible values : 'bert', 'basic'")
+
+# toggle conditionning in the denoiser
+parser.add_argument('--use-cond-denoising', action='store_false', default=True, help="Flag to enable/disable use of conditionning in the denoiser (default: enabled)")
+
+# toggle conditionning in the denoiser
+parser.add_argument('--resume-training-vae', action='store_true', default=False, help="Flag to pick up the training of the autoencoder")
 
 args = parser.parse_args()
 
@@ -148,9 +164,10 @@ elif args.text_embedding == 'bert':
     
 
 else:
-    trainset = preprocess_dataset("train", args.n_max_nodes, args.spectral_emb_dim)
-    validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim)
-    testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim)
+    trainset = preprocess_dataset("train", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
+    validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
+    testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim, args.dataset)
+
 
 
 
@@ -162,62 +179,64 @@ val_loader_clip = DataLoader(validset, batch_size=args.batch_size_clip, shuffle=
 test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
 # initialize VGAE model
-autoencoder = CondCLIPVAE(args.spectral_emb_dim+1, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, args.n_max_nodes, args.n_condition).to(device)
 
+autoencoder = CondVariationalAutoEncoder(args.spectral_emb_dim+1, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, n_max_nodes=args.n_max_nodes, cond_hid_dim=args.cond_hid_dim).to(device)
+
+if args.resume_training_vae:
+    print('Loading VAE checkpoint...')
+    checkpoint = torch.load('autoencoder_condVAE.pth.tar')
+    autoencoder.load_state_dict(checkpoint['state_dict'])
 optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
+
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 early_stopping_counts = 0
 
 
-# Train VGAE model
-#### JOINT TRAINING
-print("\nTraining graph and text encoders via CLIP, and decoder...")
-#autoencoder.freeze_decoder()
+
+#### TRAIN CONDITIONAL VAE
+print("\nTraining the conditional VAE....")
 if args.train_autoencoder:
+
     best_val_loss = np.inf
-    for epoch in range(1, args.epochs_clip+1):
+    
+    for epoch in range(1, args.epochs_autoencoder + 1):
         autoencoder.train()
         train_loss_all = 0
         train_count = 0
         train_loss_all_recon = 0
-        train_loss_all_clip = 0
+        train_loss_all_kld = 0
         cnt_train=0
-
-        for data in train_loader_clip:
+        
+        for data in train_loader:
             data = data.to(device)
             optimizer.zero_grad()
-            loss, recon, clip = autoencoder.joint_loss_function(data)
-            #loss = autoencoder.compute_clip_loss(data)
+            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
             train_loss_all_recon += recon.item()
-            train_loss_all_clip += clip.item()
+            train_loss_all_kld += kld.item()
             cnt_train+=1
             loss.backward()
             train_loss_all += loss.item()
             train_count += torch.max(data.batch)+1
             optimizer.step()
-
         autoencoder.eval()
         val_loss_all = 0
         val_count = 0
         cnt_val = 0
         val_loss_all_recon = 0
-        val_loss_all_clip = 0
-
-        for data in val_loader_clip:
+        val_loss_all_kld = 0
+        
+        for data in val_loader:
             data = data.to(device)
-            loss, recon, clip = autoencoder.joint_loss_function(data, scaling = args.clip_loss_scaling)
-            #loss = autoencoder.compute_clip_loss(data)
+            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
             val_loss_all_recon += recon.item()
-            val_loss_all_clip += clip.item()
+            val_loss_all_kld += kld.item()
             val_loss_all += loss.item()
             cnt_val+=1
             val_count += torch.max(data.batch)+1
-
+        
         if epoch % 1 == 0:
-            dt_t = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            print('{} Epoch: {:04d}, Train Loss: {:.3f}, Train CLIP Loss: {:.3f}, Train recon: {:.3f}, Val Loss: {:.3f}, Val CLIP Loss: {:.3f}, Val recon: {:.3f}'.format(dt_t, epoch, train_loss_all/cnt_train, train_loss_all_clip/cnt_train, train_loss_all_recon/cnt_train, val_loss_all/cnt_val, val_loss_all_clip/cnt_val, val_loss_all_recon/cnt_val))
-            #print('{} Epoch: {:04d}, Train Contrastive Loss: {:.3f}, Val Contrastive Loss: {:.3f}'.format(dt_t, epoch, train_loss_all/cnt_train, val_loss_all/cnt_val))
-
+            print('Epoch: {:04d}, Train Loss: {:.5f}, Train Reconstruction Loss: {:.2f}, Train KLD Loss: {:.2f}, Val Loss: {:.5f}, Val Reconstruction Loss: {:.2f}, Val KLD Loss: {:.2f}'.format(epoch, train_loss_all/cnt_train, train_loss_all_recon/cnt_train, train_loss_all_kld/cnt_train, val_loss_all/cnt_val, val_loss_all_recon/cnt_val, val_loss_all_kld/cnt_val))
+        
         scheduler.step()
         early_stopping_counts += 1
         if best_val_loss >= val_loss_all:
@@ -225,15 +244,19 @@ if args.train_autoencoder:
             torch.save({
                 'state_dict': autoencoder.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, 'autoencoder_jointCLIP_cond.pth.tar')
+            }, f'temp/autoencoder_condVAE_{id_}.pth.tar')
             early_stopping_counts = 0
 
         if early_stopping_counts == args.early_stopping_rounds:
             print('early stopping')
             break
-else:
-    checkpoint = torch.load('autoencoder_jointCLIP_cond.pth.tar')
+
+    checkpoint = torch.load(f'temp/autoencoder_condVAE_{id_}.pth.tar')
     autoencoder.load_state_dict(checkpoint['state_dict'])
+else:
+    checkpoint = torch.load('autoencoder_condVAE.pth.tar')
+    autoencoder.load_state_dict(checkpoint['state_dict'])
+
 
 autoencoder.eval()
 
@@ -256,7 +279,12 @@ sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
 posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
 # initialize denoising model
-denoise_model = DenoiseNN(input_dim=args.latent_dim, hidden_dim=args.hidden_dim_denoise, n_layers=args.n_layers_denoise, n_cond=args.n_condition, d_cond=args.dim_condition, cond_model = autoencoder.feature_encoder).to(device)
+if args.use_cond_denoising:
+    conditioning = 'mlp'
+else:
+    conditioning = None
+
+denoise_model = DenoiseNN(input_dim=args.latent_dim, hidden_dim=args.hidden_dim_denoise, n_layers=args.n_layers_denoise, n_cond=args.n_condition, d_cond=args.dim_condition, cond_model=conditioning).to(device)
 optimizer = torch.optim.Adam(denoise_model.parameters(), lr=args.lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 early_stopping_counts = 0
@@ -268,13 +296,12 @@ if args.use_denoiser:
         best_val_loss = np.inf
         for epoch in range(1, args.epochs_denoise+1):
             denoise_model.train()
-            denoise_model.freeze_cond_model()
             train_loss_all = 0
             train_count = 0
             for data in train_loader:
                 data = data.to(device)
                 optimizer.zero_grad()
-                x_g = autoencoder.encode(data)
+                x_g = autoencoder.encode(data, data.stats)
                 t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
                 loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
                 loss.backward()
@@ -287,7 +314,7 @@ if args.use_denoiser:
             val_count = 0
             for data in val_loader:
                 data = data.to(device)
-                x_g = autoencoder.encode(data)
+                x_g = autoencoder.encode(data, data.stats)
                 t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
                 loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
                 val_loss_all += x_g.size(0) * loss.item()
@@ -298,39 +325,34 @@ if args.use_denoiser:
                 print('{} Epoch: {:04d}, Train Loss: {:.5f}, Val Loss: {:.5f}'.format(dt_t, epoch, train_loss_all/train_count, val_loss_all/val_count))
 
             scheduler.step()
-            early_stopping_counts += 1
+
+            early_stopping_counts +=1
             if best_val_loss >= val_loss_all:
                 best_val_loss = val_loss_all
                 torch.save({
                     'state_dict': denoise_model.state_dict(),
                     'optimizer' : optimizer.state_dict(),
-                }, 'denoise_model_jointCLIP_cond.pth.tar')
+                }, f'temp/denoise_model_condVAE_{id_}.pth.tar')
                 early_stopping_counts = 0
-            
+
             if early_stopping_counts == args.early_stopping_rounds:
                 print('early stopping')
                 break
+        checkpoint = torch.load(f'temp/denoise_model_condVAE_{id_}.pth.tar')
+        denoise_model.load_state_dict(checkpoint['state_dict'])
     else:
-        checkpoint = torch.load('denoise_model_jointCLIP_cond.pth.tar')
+        checkpoint = torch.load(f'denoise_model_condVAE.pth.tar')
         denoise_model.load_state_dict(checkpoint['state_dict'])
 
-denoise_model.eval()
+    denoise_model.eval()
 
 del train_loader, val_loader
 
-mae = eval(test_loader, autoencoder, args.latent_dim, cond_decoder=True)
-print(mae)
 
-# save vae
-checkpoint = torch.load('autoencoder_jointCLIP_cond.pth.tar')
-autoencoder.load_state_dict(checkpoint['state_dict'])
-torch.save({
-                'state_dict': autoencoder.state_dict(),
-                'optimizer' : optimizer.state_dict(),
-            }, f"runs/autoencoder_jointCLIP_cond_{str(mae)[:6].replace('.', '-')}.pth.tar")
+
 
 # Save to a CSV file
-with open(f"runs/jointCLIP_cond_{str(mae)[:6].replace('.', '-')}.csv", "w", newline="") as csvfile:
+with open(f"temp/condVAE_{id_}.csv", "w", newline="") as csvfile:
     writer = csv.writer(csvfile)
     # Write the header
     writer.writerow(["graph_id", "edge_list"])
@@ -348,8 +370,7 @@ with open(f"runs/jointCLIP_cond_{str(mae)[:6].replace('.', '-')}.csv", "w", newl
         else:
             x_sample = torch.randn(bs, args.latent_dim, device=device)
 
-        cond = autoencoder.feature_encoder(data)
-        adj = autoencoder.decode_mu(x_sample, cond)
+        adj = autoencoder.decode_mu(x_sample, data.stats)
         stat_d = torch.reshape(stat, (-1, args.n_condition))
 
 
@@ -366,3 +387,60 @@ with open(f"runs/jointCLIP_cond_{str(mae)[:6].replace('.', '-')}.csv", "w", newl
             edge_list_text = ", ".join([f"({u}, {v})" for u, v in Gs_generated.edges()])           
             # Write the graph ID and the full edge list as a single row
             writer.writerow([graph_id, edge_list_text])
+
+
+### Evaluate
+truth_file = f'{args.dataset}/test/test.txt'
+pred_file = f"temp/condVAE_{id_}.csv"
+
+mae = eval(truth_file, pred_file)
+
+print(f"-----------------------------------------------\nTest MAE : {mae}\n-----------------------------------------------")
+
+
+os.rename(f"temp/condVAE_{id_}.csv", f"runs/output_csvs/condVAE_{str(mae)[:7].replace('.', '-')}.csv")
+
+# save vae
+if args.train_autoencoder:
+    checkpoint = torch.load(f'temp/autoencoder_condVAE_{id_}.pth.tar')
+    autoencoder.load_state_dict(checkpoint['state_dict'])
+    torch.save({
+                    'state_dict': autoencoder.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                }, f"runs/autoencoders/autoencoder_condVAE_{str(mae)[:7].replace('.', '-')}.pth.tar")
+
+else:
+    checkpoint = torch.load('autoencoder_condVAE.pth.tar')
+    autoencoder.load_state_dict(checkpoint['state_dict'])
+    torch.save({
+                    'state_dict': autoencoder.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                }, f"runs/autoencoders/autoencoder_condVAE_{str(mae)[:7].replace('.', '-')}.pth.tar")
+
+#save denoiser
+if args.use_denoiser:
+    if args.train_denoiser:
+        checkpoint = torch.load(f'temp/denoise_model_condVAE_{id_}.pth.tar')
+        denoise_model.load_state_dict(checkpoint['state_dict'])
+        torch.save({
+                        'state_dict': autoencoder.state_dict(),
+                        'optimizer' : optimizer.state_dict(),
+                    }, f"runs/denoisers/denoise_model_condVAE_{str(mae)[:7].replace('.', '-')}.pth.tar")
+    else:
+        checkpoint = torch.load(f'denoise_model_condVAE.pth.tar')
+        denoise_model.load_state_dict(checkpoint['state_dict'])
+        torch.save({
+                        'state_dict': autoencoder.state_dict(),
+                        'optimizer' : optimizer.state_dict(),
+                    }, f"runs/denoisers/denoise_model_condVAE_{str(mae)[:7].replace('.', '-')}.pth.tar")
+
+
+#save_args not to get lost
+def save_args_to_file(args, file_path=f"runs/args/args_{str(mae)[:7].replace('.', '-')}.txt"):
+    with open(file_path, "w") as f:
+        f.write("Parsed Arguments:\n")
+        for key, value in vars(args).items():
+            f.write(f"{key}: {value}\n")
+    print(f"Arguments saved to {os.path.abspath(file_path)}")
+
+save_args_to_file(args)
